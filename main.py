@@ -13,6 +13,9 @@ from pydub import AudioSegment
 from pydub.silence import detect_leading_silence
 import soundfile
 import whisper
+from pysrt import open as srt_open
+from datetime import datetime
+import json
 
 # === Configuration ===
 
@@ -54,7 +57,7 @@ def get_speed_factor(subsDict, trimmedAudio, desiredDuration, num):
     return subsDict
 
 def stretch_with_ffmpeg(audioInput, speed_factor):
-    speed_factor = max(0.5, min(speed_factor, 100.0))
+    speed_factor = max(0.6, min(speed_factor, 1.6))
     command = ['ffmpeg', '-i', 'pipe:0', '-filter:a', f'atempo={speed_factor}', '-f', 'wav', 'pipe:1']
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, err = process.communicate(input=audioInput.getvalue())
@@ -63,8 +66,13 @@ def stretch_with_ffmpeg(audioInput, speed_factor):
     return out
 
 def stretch_audio_clip(audioFileToStretch, speedFactor, num):
-    stretched_audio = stretch_with_ffmpeg(audioFileToStretch, speedFactor)
-    return AudioSegment.from_file(io.BytesIO(stretched_audio), format="wav")
+    speedFactor = max(0.6, min(speedFactor, 1.6))
+    command = ['ffmpeg', '-i', 'pipe:0', '-filter:a', f"atempo={speedFactor}", '-f', 'wav', 'pipe:1']
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = process.communicate(input=audioFileToStretch.getvalue())
+    if process.returncode != 0:
+        raise Exception(f"FFmpeg error: {err.decode()}")
+    return AudioSegment.from_file(io.BytesIO(out), format="wav")
 
 def time_str_to_ms(time_str):
     h, m, s = time_str.split(":")
@@ -102,10 +110,48 @@ def load_subtitles(file_path):
 
 # === Core Processing Logic with Pause/Stop ===
 
-def transcribe_audio_with_whisper(audio_path):
-    model = whisper.load_model("medium")  # Or "small", "large"
-    result = model.transcribe(audio_path, word_timestamps=False)
-    return result['segments']  # List of dicts with 'start', 'end', 'text'
+def simulate_progress(progress_callback, done_flag):
+    for i in range(50):  # simulate up to 40%
+        if done_flag.is_set():
+            break
+        progress_callback(5 + (i * (35 / 50)))
+        time.sleep(0.1)
+
+def transcribe_audio_with_whisper(audio_path, json_path=None, progress_callback=None, log_callback=None):
+    model = whisper.load_model("medium")
+    done_flag = threading.Event()
+
+    if progress_callback:
+        threading.Thread(target=simulate_progress, args=(progress_callback, done_flag), daemon=True).start()
+
+    result = model.transcribe(audio_path, word_timestamps=False, verbose=False)
+    done_flag.set()
+
+    if progress_callback:
+        progress_callback(40)  # mark transcription complete
+
+    detected_lang = result.get("language", "unknown")
+    if log_callback:
+        log_callback(f"Detected language: {detected_lang}")
+
+    # Save with timestamp and language in metadata
+    if json_path:
+        result["meta"] = {
+            "detected_language": detected_lang,
+            "created": datetime.now().isoformat()
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        if log_callback:
+            log_callback(f"Transcript saved to: {json_path}")
+
+    return result['segments'], detected_lang
+
+def load_whisper_json(json_path):
+    import json
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data['segments']
 
 def trim_clip(inputSound: AudioSegment) -> AudioSegment:
     start_trim = detect_leading_silence(inputSound)
@@ -121,9 +167,40 @@ def stretch_audio_clip(audioFileToStretch, speedFactor, num):
         raise Exception(f"FFmpeg error: {err.decode()}")
     return AudioSegment.from_file(io.BytesIO(out), format="wav")
 
-def process_audio_with_progress(srt_path, audio_path, output_path, log_callback, progress_callback, pause_check):
-    from pysrt import open as srt_open
+def align_whisper_segments_to_subs(whisper_segments, subsDict, audio):
+    aligned_audio_clips = []
+    seg_index = 0
+    whisper_len = len(whisper_segments)
 
+    for sub_index in subsDict:
+        target_duration = subsDict[sub_index]['duration_ms']
+        collected = []
+        collected_duration = 0
+
+        while seg_index < whisper_len:
+            seg = whisper_segments[seg_index]
+            seg_start = int(seg['start'] * 1000)
+            seg_end = int(seg['end'] * 1000)
+            duration = seg_end - seg_start
+
+            if collected_duration + duration > target_duration and collected:
+                break
+
+            collected.append((seg_start, seg_end))
+            collected_duration += duration
+            seg_index += 1
+
+        if not collected:
+            raise Exception(f"No whisper segments collected for subtitle {sub_index}")
+
+        first_start = collected[0][0]
+        last_end = collected[-1][1]
+        clip = audio[first_start:last_end]
+        aligned_audio_clips.append(clip)
+
+    return aligned_audio_clips
+
+def process_audio_with_progress(srt_path, audio_path, output_path, log_callback, progress_callback, pause_check, transcript_path=None):
     log_callback("Loading English subtitles...")
     subs = srt_open(srt_path)
     subsDict = {
@@ -137,20 +214,28 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
     log_callback("Loading voiceover audio and trimming silence...")
     full_audio = AudioSegment.from_file(audio_path)
     trimmed_audio = trim_clip(full_audio)
-    trimmed_audio.export("temp_trimmed.wav", format="wav")
+    trimmed_path = "temp_trimmed.wav"
+    trimmed_audio.export(trimmed_path, format="wav")
 
-    log_callback("Transcribing audio with Whisper...")
-    whisper_segments = transcribe_audio_with_whisper("temp_trimmed.wav")
-    if len(whisper_segments) != len(subsDict):
-        raise Exception(f"Mismatch: {len(whisper_segments)} transcribed vs {len(subsDict)} subtitles")
+    if transcript_path and os.path.exists(transcript_path):
+        log_callback(f"Loading Whisper transcription from file: {transcript_path}")
+        whisper_segments = load_whisper_json(transcript_path)
+        progress_callback(40)  # Jump ahead if loading
+    else:
+        log_callback("Transcribing audio with Whisper...")
+        base_name = os.path.splitext(os.path.basename(audio_path))[0]
+        json_out = os.path.join(workingFolder, f"{base_name}_transcript.json")
+        whisper_segments, detected_lang = transcribe_audio_with_whisper(
+            trimmed_path, json_out,
+            progress_callback=progress_callback,
+            log_callback=log_callback
+        )
+        if hasattr(log_callback, '__self__'):
+            setattr(log_callback.__self__, "detected_language", detected_lang)
+    log_callback(f"Aligning {len(whisper_segments)} Whisper segments to {len(subsDict)} subtitles...")
+    whisper_clips = align_whisper_segments_to_subs(whisper_segments, subsDict, trimmed_audio)
 
-    whisper_clips = []
-    for seg in whisper_segments:
-        start_ms = int(seg['start'] * 1000)
-        end_ms = int(seg['end'] * 1000)
-        whisper_clips.append(trimmed_audio[start_ms:end_ms])
-
-    log_callback("Aligning segments and creating final canvas...")
+    log_callback("Building final audio canvas...")
     canvas_duration = max(s["end_ms"] for s in subsDict.values())
     canvas = AudioSegment.silent(duration=canvas_duration)
 
@@ -167,12 +252,26 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
 
         canvas = canvas.overlay(stretched, position=subsDict[key]["start_ms"])
         progress_callback((i / len(subsDict)) * 100)
-        log_callback(f"Aligned segment {i}/{len(subsDict)}")
+        log_callback(f"Segment {i}/{len(subsDict)} aligned and inserted.")
 
-    log_callback("Exporting final synced audio...")
-    canvas.export(output_path, format=os.path.splitext(output_path)[1][1:], bitrate="192k")
-    log_callback(f"✅ Done! Output saved to: {output_path}")
-    
+        log_callback("Exporting final synced audio...")
+        output_format = os.path.splitext(output_path)[1][1:]  # gets 'mp3' or 'wav'
+        
+        export_params = {
+            "format": output_format,
+            "bitrate": "192k"
+        }
+        
+        # Add specific parameters for MP3 export
+        if output_format == "mp3":
+            export_params.update({
+                "codec": "libmp3lame",
+                "parameters": ["-q:a", "0"]  # Highest quality MP3
+            })
+        
+        canvas.export(output_path, **export_params)
+        log_callback(f"✅ Finished. Output saved as {output_format.upper()} to: {output_path}")
+
 # === GUI ===
 
 class AudioApp:
@@ -186,6 +285,8 @@ class AudioApp:
         self.paused = False
         self.stop_requested = False
         self.worker_thread = None
+        self.use_existing_transcript = tk.BooleanVar(value=False)
+        self.transcript_path = ""
 
         self.build_ui()
 
@@ -199,9 +300,24 @@ class AudioApp:
         tb.Label(frame, text="2. Select AI Voiceover (.mp3)").pack(anchor=W)
         tb.Button(frame, text="Browse Audio File", command=self.browse_audio).pack(fill=X)
 
+        tb.Checkbutton(
+            frame,
+            text="Use existing Whisper transcript (.json)",
+            variable=self.use_existing_transcript,
+            command=self.toggle_transcript_option
+        ).pack(anchor=W)
+
+        self.transcript_btn = tb.Button(
+            frame,
+            text="Browse Transcript File",
+            command=self.browse_transcript,
+            state="disabled"
+        )
+        self.transcript_btn.pack(fill=X)
+
         tb.Label(frame, text="3. Choose Output Format").pack(anchor=W)
         self.format_var = tk.StringVar(value="wav")
-        tb.OptionMenu(frame, self.format_var, "wav", "mp3", "wav").pack(fill=X)
+        tb.OptionMenu(frame, self.format_var, "wav", "mp3").pack(fill=X)
 
         self.start_btn = tb.Button(frame, text="Start", bootstyle=SUCCESS, command=self.start_thread)
         self.start_btn.pack(fill=X, pady=(10, 0))
@@ -217,6 +333,19 @@ class AudioApp:
 
         self.log = tk.Text(frame, height=15, wrap=tk.WORD)
         self.log.pack(fill=BOTH, expand=True)
+
+    def toggle_transcript_option(self):
+        if self.use_existing_transcript.get():
+            self.transcript_btn.config(state="normal")
+        else:
+            self.transcript_btn.config(state="disabled")
+            self.transcript_path = ""
+
+    def browse_transcript(self):
+        path = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
+        if path:
+            self.transcript_path = path
+            self.log_message(f"Selected Transcript File: {path}")
 
     def set_button_states(self, running=False, paused=False, finished=False):
         self.start_btn.config(state="disabled" if running else "normal")
@@ -251,12 +380,16 @@ class AudioApp:
     def request_stop(self):
         self.stop_requested = True
         self.progress["value"] = 0
+
         if os.path.exists(self.output_path):
             try:
                 os.remove(self.output_path)
                 self.log_message("Stopped. Output file deleted.")
             except Exception as e:
                 self.log_message(f"Could not delete output: {e}")
+
+        self.log.delete("1.0", tk.END)  # ← clear the text window
+        self.log_message("Processing stopped.")
         self.set_button_states(running=False, finished=True)
 
     def wait_if_paused(self):
@@ -289,9 +422,12 @@ class AudioApp:
                 self.output_path,
                 log_callback=self.log_message,
                 progress_callback=self.update_progress,
-                pause_check=self.wait_if_paused
+                pause_check=self.wait_if_paused,
+                transcript_path=self.transcript_path if self.use_existing_transcript.get() else None
             )
             self.log_message("✅ Finished.")
+            if hasattr(self, "detected_language") and self.detected_language:
+                self.log_message(f"🈯 Detected language: {self.detected_language}")
         except Exception as e:
             self.log_message(f"⚠️ {str(e)}")
         finally:

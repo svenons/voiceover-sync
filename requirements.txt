@@ -1,0 +1,5 @@
+pysrt==1.1.2
+webvtt-py==0.5.1
+pydub==0.25.1
+soundfile==0.13.1
+ttkbootstrap==1.13.11

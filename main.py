@@ -214,7 +214,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
     log_callback("Loading voiceover audio and trimming silence...")
     full_audio = AudioSegment.from_file(audio_path)
     trimmed_audio = trim_clip(full_audio)
-    trimmed_path = "temp_trimmed.wav"
+    trimmed_path = os.path.join(workingFolder, "temp_trimmed.wav")
     trimmed_audio.export(trimmed_path, format="wav")
 
     if transcript_path and os.path.exists(transcript_path):

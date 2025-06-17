@@ -21,7 +21,8 @@ import json
 
 class Config:
     debug_mode = False
-    output_format = "wav"
+    MIN_SPEED = 0.6
+    MAX_SPEED = 1.6
 
 class SubsDictKeys:
     start_ms = "start_ms"
@@ -66,7 +67,7 @@ def stretch_with_ffmpeg(audioInput, speed_factor):
     return out
 
 def stretch_audio_clip(audioFileToStretch, speedFactor, num):
-    speedFactor = max(0.6, min(speedFactor, 1.6))
+    speedFactor = max(Config.MIN_SPEED, min(speedFactor, Config.MAX_SPEED))
     command = ['ffmpeg', '-i', 'pipe:0', '-filter:a', f"atempo={speedFactor}", '-f', 'wav', 'pipe:1']
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, err = process.communicate(input=audioFileToStretch.getvalue())
@@ -220,7 +221,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
     if transcript_path and os.path.exists(transcript_path):
         log_callback(f"Loading Whisper transcription from file: {transcript_path}")
         whisper_segments = load_whisper_json(transcript_path)
-        progress_callback(40)  # Jump ahead if loading
+        progress_callback(40)
     else:
         log_callback("Transcribing audio with Whisper...")
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
@@ -232,6 +233,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
         )
         if hasattr(log_callback, '__self__'):
             setattr(log_callback.__self__, "detected_language", detected_lang)
+
     log_callback(f"Aligning {len(whisper_segments)} Whisper segments to {len(subsDict)} subtitles...")
     whisper_clips = align_whisper_segments_to_subs(whisper_segments, subsDict, trimmed_audio)
 
@@ -239,39 +241,75 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
     canvas_duration = max(s["end_ms"] for s in subsDict.values())
     canvas = AudioSegment.silent(duration=canvas_duration)
 
+    speed_up_mode = False
+    remaining_overflow = 0
+
     for i, key in enumerate(subsDict, 1):
         pause_check()
         target_duration = subsDict[key]["duration_ms"]
         clip = whisper_clips[i - 1]
         trimmed = trim_clip(clip)
+        clip_duration = len(trimmed)
+
+        # Calculate natural speed factor
+        natural_speed = clip_duration / target_duration
+
+        if natural_speed > Config.MAX_SPEED or speed_up_mode:
+            # Audio is too long, even at max speed
+            speed_factor = Config.MAX_SPEED
+            actual_duration = clip_duration / speed_factor
+            overflow = actual_duration - target_duration
+            
+            if overflow > 0:
+                remaining_overflow += overflow
+                speed_up_mode = True
+                log_callback(f"Segment {i} too long - will speed up following segments to catch up ({remaining_overflow:.0f}ms overflow)")
+            
+        elif speed_up_mode and remaining_overflow > 0:
+            # Try to catch up by speeding up this segment
+            speed_factor = min(Config.MAX_SPEED, clip_duration / (target_duration - remaining_overflow))
+            time_saved = target_duration - (clip_duration / speed_factor)
+            remaining_overflow = max(0, remaining_overflow - time_saved)
+            
+            if remaining_overflow == 0:
+                speed_up_mode = False
+                log_callback(f"✓ Caught up at segment {i}")
+        else:
+            speed_factor = natural_speed
 
         temp_buf = io.BytesIO()
         trimmed.export(temp_buf, format="wav")
-        speed_factor = len(trimmed) / target_duration
         stretched = stretch_audio_clip(temp_buf, speed_factor, i)
 
+        # Place audio at subtitle start time
         canvas = canvas.overlay(stretched, position=subsDict[key]["start_ms"])
         progress_callback((i / len(subsDict)) * 100)
-        log_callback(f"Segment {i}/{len(subsDict)} aligned and inserted.")
+        log_callback(f"Segment {i}/{len(subsDict)} processed at {speed_factor:.2f}x speed")
 
-        log_callback("Exporting final synced audio...")
-        output_format = os.path.splitext(output_path)[1][1:]  # gets 'mp3' or 'wav'
-        
-        export_params = {
-            "format": output_format,
-            "bitrate": "192k"
-        }
-        
-        # Add specific parameters for MP3 export
-        if output_format == "mp3":
-            export_params.update({
-                "codec": "libmp3lame",
-                "parameters": ["-q:a", "0"]  # Highest quality MP3
-            })
-        
-        canvas.export(output_path, **export_params)
-        log_callback(f"✅ Finished. Output saved as {output_format.upper()} to: {output_path}")
+    log_callback("Exporting final synced audio...")
+    output_format = os.path.splitext(output_path)[1][1:]
+    
+    export_params = {
+        "format": output_format,
+        "bitrate": "192k"
+    }
+    
+    if output_format == "mp3":
+        export_params.update({
+            "codec": "libmp3lame",
+            "parameters": ["-q:a", "0"]
+        })
+    
+    canvas.export(output_path, **export_params)
+    log_callback(f"✅ Finished. Output saved as {output_format.upper()} to: {output_path}")
 
+    # Clean up temporary file
+    if os.path.exists(trimmed_path):
+        try:
+            os.remove(trimmed_path)
+            log_callback("Cleaned up temporary files.")
+        except Exception as e:
+            log_callback(f"Could not clean up temporary file: {e}")
 # === GUI ===
 
 class AudioApp:

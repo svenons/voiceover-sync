@@ -3,7 +3,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
-import os
+import os, sys
 import io
 import subprocess
 import pysrt
@@ -16,6 +16,13 @@ import whisper
 from pysrt import open as srt_open
 from datetime import datetime
 import json
+
+# === Helper Functions ===
+def get_base_path():
+    # If running as a PyInstaller bundle
+    if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
 
 # === Configuration ===
 
@@ -32,8 +39,9 @@ class SubsDictKeys:
     TTS_FilePath = "tts_filepath"
     TTS_FilePath_Trimmed = "tts_filepath_trimmed"
 
-workingFolder = "workingFolder"
-OUTPUT_FOLDER = "output"
+BASE_DIR = get_base_path()
+workingFolder = os.path.join(BASE_DIR, "workingFolder")
+OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
 os.makedirs(workingFolder, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 config = Config()
@@ -215,7 +223,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
     log_callback("Loading voiceover audio and trimming silence...")
     full_audio = AudioSegment.from_file(audio_path)
     trimmed_audio = trim_clip(full_audio)
-    trimmed_path = os.path.join(workingFolder, "temp_trimmed.wav")
+    trimmed_path = os.path.abspath(os.path.join(workingFolder, "temp_trimmed.wav"))
     trimmed_audio.export(trimmed_path, format="wav")
 
     if transcript_path and os.path.exists(transcript_path):
@@ -254,34 +262,46 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
         # Calculate natural speed factor
         natural_speed = clip_duration / target_duration
 
-        if natural_speed > Config.MAX_SPEED or speed_up_mode:
-            # Audio is too long, even at max speed
+        # Default to natural speed
+        speed_factor = natural_speed
+
+        if natural_speed > Config.MAX_SPEED:
+            # Clip too long, even at max speed
             speed_factor = Config.MAX_SPEED
             actual_duration = clip_duration / speed_factor
             overflow = actual_duration - target_duration
-            
+
             if overflow > 0:
                 remaining_overflow += overflow
                 speed_up_mode = True
                 log_callback(f"Segment {i} too long - will speed up following segments to catch up ({remaining_overflow:.0f}ms overflow)")
-            
+
         elif speed_up_mode and remaining_overflow > 0:
-            # Try to catch up by speeding up this segment
-            speed_factor = min(Config.MAX_SPEED, clip_duration / (target_duration - remaining_overflow))
-            time_saved = target_duration - (clip_duration / speed_factor)
+            # Try to catch up by speeding up slightly more than needed
+            effective_target = max(50, target_duration - remaining_overflow)
+            speed_factor = min(Config.MAX_SPEED, clip_duration / effective_target)
+            actual_duration = clip_duration / speed_factor
+            time_saved = target_duration - actual_duration
+
             remaining_overflow = max(0, remaining_overflow - time_saved)
-            
-            if remaining_overflow == 0:
+            log_callback(f"Segment {i} catching up - saved {time_saved:.0f}ms, remaining overflow: {remaining_overflow:.0f}ms")
+
+            if remaining_overflow <= 0:
                 speed_up_mode = False
                 log_callback(f"✓ Caught up at segment {i}")
+
         else:
-            speed_factor = natural_speed
+            # We're fine: natural speed within limits
+            speed_up_mode = False
+            remaining_overflow = 0
+
+        # Clamp speed before usage and logging
+        speed_factor = max(Config.MIN_SPEED, min(speed_factor, Config.MAX_SPEED))
 
         temp_buf = io.BytesIO()
         trimmed.export(temp_buf, format="wav")
         stretched = stretch_audio_clip(temp_buf, speed_factor, i)
 
-        # Place audio at subtitle start time
         canvas = canvas.overlay(stretched, position=subsDict[key]["start_ms"])
         progress_callback((i / len(subsDict)) * 100)
         log_callback(f"Segment {i}/{len(subsDict)} processed at {speed_factor:.2f}x speed")
@@ -382,7 +402,7 @@ class AudioApp:
     def browse_transcript(self):
         path = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
         if path:
-            self.transcript_path = path
+            self.transcript_path = os.path.abspath(path)
             self.log_message(f"Selected Transcript File: {path}")
 
     def set_button_states(self, running=False, paused=False, finished=False):
@@ -394,13 +414,13 @@ class AudioApp:
     def browse_srt(self):
         path = filedialog.askopenfilename(filetypes=[("Subtitle Files", "*.srt *.vtt")])
         if path:
-            self.srt_path = path
+            self.srt_path = os.path.abspath(path)
             self.log_message(f"Selected Subtitle File: {path}")
 
     def browse_audio(self):
         path = filedialog.askopenfilename(filetypes=[("Audio Files", "*.mp3")])
         if path:
-            self.audio_path = path
+            self.audio_path = os.path.abspath(path)
             self.log_message(f"Selected Audio File: {path}")
 
     def log_message(self, msg):
@@ -441,7 +461,7 @@ class AudioApp:
             messagebox.showwarning("Missing Input", "Please select both a subtitle and audio file.")
             return
         self.output_format = self.format_var.get()
-        self.output_path = os.path.join(OUTPUT_FOLDER, f"final_output.{self.output_format}")
+        self.output_path = os.path.abspath(os.path.join(OUTPUT_FOLDER, f"final_output.{self.output_format}"))
 
         self.progress["value"] = 0
         self.paused = False
@@ -475,6 +495,5 @@ class AudioApp:
 
 if __name__ == "__main__":
     app = tb.Window(themename="darkly")
-    app.iconbitmap("icon.ico")
     AudioApp(app)
     app.mainloop()

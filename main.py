@@ -12,6 +12,7 @@ import time
 from pydub import AudioSegment
 from pydub.silence import detect_leading_silence
 import soundfile
+import whisper
 
 # === Configuration ===
 
@@ -101,73 +102,77 @@ def load_subtitles(file_path):
 
 # === Core Processing Logic with Pause/Stop ===
 
+def transcribe_audio_with_whisper(audio_path):
+    model = whisper.load_model("medium")  # Or "small", "large"
+    result = model.transcribe(audio_path, word_timestamps=False)
+    return result['segments']  # List of dicts with 'start', 'end', 'text'
+
+def trim_clip(inputSound: AudioSegment) -> AudioSegment:
+    start_trim = detect_leading_silence(inputSound)
+    end_trim = detect_leading_silence(inputSound.reverse())
+    return inputSound[start_trim:len(inputSound) - end_trim]
+
+def stretch_audio_clip(audioFileToStretch, speedFactor, num):
+    speedFactor = max(0.5, min(speedFactor, 2.0))
+    command = ['ffmpeg', '-i', 'pipe:0', '-filter:a', f"atempo={speedFactor}", '-f', 'wav', 'pipe:1']
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = process.communicate(input=audioFileToStretch.getvalue())
+    if process.returncode != 0:
+        raise Exception(f"FFmpeg error: {err.decode()}")
+    return AudioSegment.from_file(io.BytesIO(out), format="wav")
+
 def process_audio_with_progress(srt_path, audio_path, output_path, log_callback, progress_callback, pause_check):
-    log_callback("Loading subtitles...")
-    subsDict = load_subtitles(srt_path)
+    from pysrt import open as srt_open
 
+    log_callback("Loading English subtitles...")
+    subs = srt_open(srt_path)
+    subsDict = {
+        i + 1: {
+            "start_ms": int(sub.start.ordinal),
+            "end_ms": int(sub.end.ordinal),
+            "duration_ms": int(sub.end.ordinal - sub.start.ordinal)
+        } for i, sub in enumerate(subs)
+    }
+
+    log_callback("Loading voiceover audio and trimming silence...")
     full_audio = AudioSegment.from_file(audio_path)
-    total_steps = len(subsDict) * 4 + 1
-    current_step = 0
+    trimmed_audio = trim_clip(full_audio)
+    trimmed_audio.export("temp_trimmed.wav", format="wav")
 
-    def step(msg=None):
-        nonlocal current_step
-        current_step += 1
-        percent = (current_step / total_steps) * 100
-        progress_callback(percent)
-        if msg:
-            log_callback(msg)
+    log_callback("Transcribing audio with Whisper...")
+    whisper_segments = transcribe_audio_with_whisper("temp_trimmed.wav")
+    if len(whisper_segments) != len(subsDict):
+        raise Exception(f"Mismatch: {len(whisper_segments)} transcribed vs {len(subsDict)} subtitles")
+
+    whisper_clips = []
+    for seg in whisper_segments:
+        start_ms = int(seg['start'] * 1000)
+        end_ms = int(seg['end'] * 1000)
+        whisper_clips.append(trimmed_audio[start_ms:end_ms])
+
+    log_callback("Aligning segments and creating final canvas...")
+    canvas_duration = max(s["end_ms"] for s in subsDict.values())
+    canvas = AudioSegment.silent(duration=canvas_duration)
+
+    for i, key in enumerate(subsDict, 1):
         pause_check()
+        target_duration = subsDict[key]["duration_ms"]
+        clip = whisper_clips[i - 1]
+        trimmed = trim_clip(clip)
 
-    log_callback("Segmenting audio...")
-    for key, value in subsDict.items():
-        pause_check()
-        segment = full_audio[value[SubsDictKeys.start_ms]:value[SubsDictKeys.end_ms]]
-        segment.export(value[SubsDictKeys.TTS_FilePath], format="mp3")
-        step(f"Segmented {key} / {len(subsDict)}")
+        temp_buf = io.BytesIO()
+        trimmed.export(temp_buf, format="wav")
+        speed_factor = len(trimmed) / target_duration
+        stretched = stretch_audio_clip(temp_buf, speed_factor, i)
 
-    log_callback("Trimming silence...")
-    virtualTrimmedFileDict = {}
-    for key, value in subsDict.items():
-        pause_check()
-        rawClip = AudioSegment.from_file(value[SubsDictKeys.TTS_FilePath], format="mp3")
-        trimmedClip = trim_clip(rawClip)
-        tempTrimmedFile = io.BytesIO()
-        trimmedClip.export(tempTrimmedFile, format="wav")
-        virtualTrimmedFileDict[key] = tempTrimmedFile
-        step(f"Trimmed {key} / {len(subsDict)}")
+        canvas = canvas.overlay(stretched, position=subsDict[key]["start_ms"])
+        progress_callback((i / len(subsDict)) * 100)
+        log_callback(f"Aligned segment {i}/{len(subsDict)}")
 
-    log_callback("Calculating speed factors...")
-    for key in subsDict:
-        pause_check()
-        subsDict = get_speed_factor(subsDict, virtualTrimmedFileDict[key], subsDict[key][SubsDictKeys.duration_ms], key)
-        step(f"Speed factor {key} / {len(subsDict)}")
-
-    total_duration = max(sub[SubsDictKeys.end_ms] for sub in subsDict.values())
-    canvas = create_canvas(total_duration)
-
-    log_callback("Stretching and inserting audio...")
-    for key in subsDict:
-        pause_check()
-        try:
-            stretchedClip = stretch_audio_clip(virtualTrimmedFileDict[key], subsDict[key][SubsDictKeys.speed_factor], key)
-            canvas = insert_audio(canvas, stretchedClip, subsDict[key][SubsDictKeys.start_ms])
-        except Exception as e:
-            log_callback(f"Error in segment {key}: {str(e)}")
-        step(f"Processed {key} / {len(subsDict)}")
-
-    log_callback("Exporting final audio...")
-    pause_check()
-    canvas = canvas.set_channels(2)
-    try:
-        canvas.export(output_path, format=os.path.splitext(output_path)[1][1:], bitrate="192k")
-        log_callback(f"Audio saved to: {output_path}")
-    except Exception as e:
-        backup_path = output_path + ".bak"
-        canvas.export(backup_path, format="wav", bitrate="192k")
-        log_callback(f"Export failed. Backup saved to {backup_path}")
-        log_callback(f"Error: {str(e)}")
-    step("Done!")
-
+    log_callback("Exporting final synced audio...")
+    canvas.export(output_path, format=os.path.splitext(output_path)[1][1:], bitrate="192k")
+    log_callback(f"✅ Done! Output saved to: {output_path}")
+    
 # === GUI ===
 
 class AudioApp:

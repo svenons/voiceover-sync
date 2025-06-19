@@ -28,8 +28,8 @@ def get_base_path():
 
 class Config:
     debug_mode = False
-    MIN_SPEED = 0.65
-    MAX_SPEED = 1.35
+    MIN_SPEED = 0.7
+    MAX_SPEED = 1.25
 
 class SubsDictKeys:
     start_ms = "start_ms"
@@ -383,7 +383,7 @@ class AudioApp:
 
         tb.Checkbutton(
             frame,
-            text="Use existing Whisper transcript (.json)",
+            text="Use existing AI Voiceover Whisper transcript (.json)",
             variable=self.use_existing_transcript,
             command=self.toggle_transcript_option
         ).pack(anchor=W)
@@ -484,7 +484,12 @@ class AudioApp:
             messagebox.showwarning("Missing Input", "Please select both a subtitle and audio file.")
             return
         self.output_format = self.format_var.get()
-        self.output_path = os.path.abspath(os.path.join(OUTPUT_FOLDER, f"final_output.{self.output_format}"))
+        # Get detected language if available (fallback to 'unknown')
+        lang = getattr(self, "detected_language", "unknown")
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+
+        filename = f"output-{lang}-{timestamp}.{self.output_format}"
+        self.output_path = os.path.abspath(os.path.join(OUTPUT_FOLDER, filename))
 
         self.progress["value"] = 0
         self.paused = False

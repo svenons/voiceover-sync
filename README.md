@@ -1,6 +1,6 @@
 # AI Voiceover Synchronizer
 
-A modern, GUI-based Python tool that synchronizes AI-generated voiceovers with subtitle timing from `.srt` or `.vtt` files. Perfect for automated dubbing, voiceover alignment, or multilingual content syncing.
+A GUI-based Python tool that synchronizes AI-generated voiceovers with subtitle timing from `.srt` or `.vtt` files. Perfect for automated dubbing, voiceover alignment, or multilingual content syncing. It's far from being perfect - but it's the best I could do on such short time.
 
 ---
 
@@ -13,6 +13,7 @@ A modern, GUI-based Python tool that synchronizes AI-generated voiceovers with s
   - Start / Pause / Continue / Stop controls
   - Live progress bar and log output  
 - ✅ Works offline using FFmpeg and Pydub  
+- ✅ Uses Whisper for automatic voiceover language detection and transcription
 - ✅ Multi-threaded to keep UI responsive  
 
 ---

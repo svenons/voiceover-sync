@@ -172,18 +172,23 @@ def align_whisper_segments_to_subs(whisper_segments, subsDict, audio):
     seg_index = 0
     whisper_len = len(whisper_segments)
 
+    last_end_time = 0
+
     for sub_index in subsDict:
         target_duration = subsDict[sub_index]['duration_ms']
+        sub_start = subsDict[sub_index]['start_ms']
+        sub_end = subsDict[sub_index]['end_ms']
         collected = []
         collected_duration = 0
 
+        # Try to collect enough Whisper segments
         while seg_index < whisper_len:
             seg = whisper_segments[seg_index]
             seg_start = int(seg['start'] * 1000)
             seg_end = int(seg['end'] * 1000)
             duration = seg_end - seg_start
 
-            if collected_duration + duration > target_duration and collected:
+            if collected and seg_start > sub_end:
                 break
 
             collected.append((seg_start, seg_end))
@@ -191,12 +196,29 @@ def align_whisper_segments_to_subs(whisper_segments, subsDict, audio):
             seg_index += 1
 
         if not collected:
-            raise Exception(f"No whisper segments collected for subtitle {sub_index}")
+            print(f"⚠️ No Whisper segments found for subtitle {sub_index}. Falling back...")
 
+            # Strategy: insert silence or copy previous audio
+            fallback_duration = target_duration
+            start_time = last_end_time  # place it after the last known good one
+
+            # Optional: avoid overlap with the next sub
+            next_sub = subsDict.get(sub_index + 1)
+            if next_sub:
+                max_allowed = next_sub['start_ms'] - start_time
+                fallback_duration = min(fallback_duration, max(50, max_allowed))
+
+            silent_clip = AudioSegment.silent(duration=fallback_duration)
+            aligned_audio_clips.append(silent_clip)
+            last_end_time = start_time + fallback_duration
+            continue
+
+        # Normal case
         first_start = collected[0][0]
         last_end = collected[-1][1]
         clip = audio[first_start:last_end]
         aligned_audio_clips.append(clip)
+        last_end_time = last_end
 
     return aligned_audio_clips
 

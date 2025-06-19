@@ -248,6 +248,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
     log_callback("Building final audio canvas...")
     canvas_duration = max(s["end_ms"] for s in subsDict.values())
     canvas = AudioSegment.silent(duration=canvas_duration)
+    actual_timeline_position = 0
 
     speed_up_mode = False
     remaining_overflow = 0
@@ -302,7 +303,16 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
         trimmed.export(temp_buf, format="wav")
         stretched = stretch_audio_clip(temp_buf, speed_factor, i)
 
-        canvas = canvas.overlay(stretched, position=subsDict[key]["start_ms"])
+        # Prevent overlap
+        start_time = max(subsDict[key]["start_ms"], actual_timeline_position)
+        end_time = start_time + len(stretched)
+        actual_timeline_position = end_time
+
+        canvas = canvas.overlay(stretched, position=start_time)
+
+        if start_time > subsDict[key]["start_ms"]:
+            log_callback(f"Segment {i} delayed by {start_time - subsDict[key]['start_ms']}ms to avoid overlap.")
+
         progress_callback((i / len(subsDict)) * 100)
         log_callback(f"Segment {i}/{len(subsDict)} processed at {speed_factor:.2f}x speed")
 

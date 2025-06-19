@@ -167,7 +167,10 @@ def stretch_audio_clip(audioFileToStretch, speedFactor, num):
         raise Exception(f"FFmpeg error: {err.decode()}")
     return AudioSegment.from_file(io.BytesIO(out), format="wav")
 
-def align_whisper_segments_to_subs(whisper_segments, subsDict, audio):
+def align_whisper_segments_to_subs(whisper_segments, subsDict, audio, log_callback):
+    consecutive_failures = 0
+    MAX_ALLOWED_CONSECUTIVE = 1
+    failed_subs = []
     aligned_audio_clips = []
     seg_index = 0
     whisper_len = len(whisper_segments)
@@ -196,13 +199,23 @@ def align_whisper_segments_to_subs(whisper_segments, subsDict, audio):
             seg_index += 1
 
         if not collected:
-            print(f"⚠️ No Whisper segments found for subtitle {sub_index}. Falling back...")
+            consecutive_failures += 1
+            failed_subs.append(sub_index)
 
-            # Strategy: insert silence or copy previous audio
+            if consecutive_failures > MAX_ALLOWED_CONSECUTIVE:
+                error_msg = (
+                    f"❌ Too many consecutive alignment failures ({consecutive_failures}) "
+                    f"starting at subtitle {failed_subs[0]}.\n"
+                    f"Likely cause: subtitles extend beyond audio transcript.\n"
+                    f"Please check sync or try a longer audio file."
+                )
+                raise Exception(error_msg)
+
+            log_callback(f"⚠️ No Whisper segments found for subtitle {sub_index}. Falling back...")
+            
             fallback_duration = target_duration
-            start_time = last_end_time  # place it after the last known good one
+            start_time = last_end_time
 
-            # Optional: avoid overlap with the next sub
             next_sub = subsDict.get(sub_index + 1)
             if next_sub:
                 max_allowed = next_sub['start_ms'] - start_time
@@ -212,6 +225,9 @@ def align_whisper_segments_to_subs(whisper_segments, subsDict, audio):
             aligned_audio_clips.append(silent_clip)
             last_end_time = start_time + fallback_duration
             continue
+        else:
+            consecutive_failures = 0
+            failed_subs = []
 
         # Normal case
         first_start = collected[0][0]
@@ -258,7 +274,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
             setattr(log_callback.__self__, "detected_language", detected_lang)
 
     log_callback(f"Aligning {len(whisper_segments)} Whisper segments to {len(subsDict)} subtitles...")
-    whisper_clips = align_whisper_segments_to_subs(whisper_segments, subsDict, trimmed_audio)
+    whisper_clips = align_whisper_segments_to_subs(whisper_segments, subsDict, trimmed_audio, log_callback)
 
     log_callback("Building final audio canvas...")
     progress_callback(45)

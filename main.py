@@ -28,8 +28,8 @@ def get_base_path():
 
 class Config:
     debug_mode = False
-    MIN_SPEED = 0.7
-    MAX_SPEED = 1.4
+    MIN_SPEED = 0.65
+    MAX_SPEED = 1.35
 
 class SubsDictKeys:
     start_ms = "start_ms"
@@ -49,7 +49,7 @@ config = Config()
 # === Audio Helpers ===
 
 def trim_clip(inputSound: AudioSegment) -> AudioSegment:
-    start_trim = detect_leading_silence(inputSound)
+    start_trim = detect_leading_silence(inputSound, silence_thresh=-55)
     end_trim = detect_leading_silence(inputSound.reverse())
     return inputSound[start_trim:len(inputSound) - end_trim]
 
@@ -119,25 +119,16 @@ def load_subtitles(file_path):
 
 # === Core Processing Logic with Pause/Stop ===
 
-def simulate_progress(progress_callback, done_flag):
-    for i in range(50):  # simulate up to 40%
-        if done_flag.is_set():
-            break
-        progress_callback(5 + (i * (35 / 50)))
-        time.sleep(0.1)
-
 def transcribe_audio_with_whisper(audio_path, json_path=None, progress_callback=None, log_callback=None):
     model = whisper.load_model("medium")
-    done_flag = threading.Event()
 
     if progress_callback:
-        threading.Thread(target=simulate_progress, args=(progress_callback, done_flag), daemon=True).start()
+        progress_callback(5)
 
     result = model.transcribe(audio_path, word_timestamps=False, verbose=False)
-    done_flag.set()
 
     if progress_callback:
-        progress_callback(40)  # mark transcription complete
+        progress_callback(35)  # mark transcription complete
 
     detected_lang = result.get("language", "unknown")
     if log_callback:
@@ -219,17 +210,19 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
             "duration_ms": int(sub.end.ordinal - sub.start.ordinal)
         } for i, sub in enumerate(subs)
     }
+    progress_callback(2)
 
     log_callback("Loading voiceover audio and trimming silence...")
     full_audio = AudioSegment.from_file(audio_path)
     trimmed_audio = trim_clip(full_audio)
     trimmed_path = os.path.abspath(os.path.join(workingFolder, "temp_trimmed.wav"))
     trimmed_audio.export(trimmed_path, format="wav")
+    progress_callback(5)
 
     if transcript_path and os.path.exists(transcript_path):
         log_callback(f"Loading Whisper transcription from file: {transcript_path}")
         whisper_segments = load_whisper_json(transcript_path)
-        progress_callback(40)
+        progress_callback(35)
     else:
         log_callback("Transcribing audio with Whisper...")
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
@@ -246,6 +239,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
     whisper_clips = align_whisper_segments_to_subs(whisper_segments, subsDict, trimmed_audio)
 
     log_callback("Building final audio canvas...")
+    progress_callback(45)
     canvas_duration = max(s["end_ms"] for s in subsDict.values())
     canvas = AudioSegment.silent(duration=canvas_duration)
     actual_timeline_position = 0
@@ -257,7 +251,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
         pause_check()
         target_duration = subsDict[key]["duration_ms"]
         clip = whisper_clips[i - 1]
-        trimmed = trim_clip(clip)
+        trimmed = clip.fade_in(10)
         clip_duration = len(trimmed)
 
         # Calculate natural speed factor
@@ -302,6 +296,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
         temp_buf = io.BytesIO()
         trimmed.export(temp_buf, format="wav")
         stretched = stretch_audio_clip(temp_buf, speed_factor, i)
+        stretched = stretched.fade_in(15)
 
         # Get potential next segment start
         next_sub = subsDict.get(i + 1)
@@ -329,7 +324,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
         if start_time > subsDict[key]["start_ms"]:
             log_callback(f"Segment {i} delayed by {start_time - subsDict[key]['start_ms']}ms to avoid overlap.")
 
-        progress_callback((i / len(subsDict)) * 100)
+        progress_callback(45 + (i / len(subsDict)) * 50)
         log_callback(f"Segment {i}/{len(subsDict)} processed at {speed_factor:.2f}x speed")
 
     log_callback("Exporting final synced audio...")
@@ -346,8 +341,10 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
             "parameters": ["-q:a", "0"]
         })
     
+    progress_callback(97)
     canvas.export(output_path, **export_params)
     log_callback(f"✅ Finished. Output saved as {output_format.upper()} to: {output_path}")
+    progress_callback(100)
 
     # Clean up temporary file
     if os.path.exists(trimmed_path):

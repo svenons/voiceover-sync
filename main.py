@@ -28,8 +28,8 @@ def get_base_path():
 
 class Config:
     debug_mode = False
-    MIN_SPEED = 0.6
-    MAX_SPEED = 1.6
+    MIN_SPEED = 0.7
+    MAX_SPEED = 1.4
 
 class SubsDictKeys:
     start_ms = "start_ms"
@@ -302,6 +302,22 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
         temp_buf = io.BytesIO()
         trimmed.export(temp_buf, format="wav")
         stretched = stretch_audio_clip(temp_buf, speed_factor, i)
+
+        # Get potential next segment start
+        next_sub = subsDict.get(i + 1)
+        gap_to_next = None
+        if next_sub:
+            gap_to_next = next_sub["start_ms"] - (actual_timeline_position + len(stretched))
+
+        # Apply short fade-out if at min speed and room to breathe
+        if (
+            abs(speed_factor - Config.MIN_SPEED) < 0.01 and
+            gap_to_next is not None and
+            gap_to_next >= 60  # Only fade if at least 60ms gap before next
+        ):
+            fade_duration = min(80, int(gap_to_next * 0.6))  # Soft, short fade
+            stretched = stretched.fade_out(fade_duration)
+            log_callback(f"Segment {i} faded out over {fade_duration}ms to smooth ending.")
 
         # Prevent overlap
         start_time = max(subsDict[key]["start_ms"], actual_timeline_position)

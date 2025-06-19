@@ -295,6 +295,25 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
         # Calculate natural speed factor
         natural_speed = clip_duration / target_duration
 
+        # ADAPTIVE ADJUSTMENT: try to reschedule next segment closer to avoid pauses
+        next_sub = subsDict.get(i + 1)
+        if (
+            next_sub and
+            abs(natural_speed - Config.MIN_SPEED) < 0.01 and  # fully slowed down
+            next_sub["start_ms"] > subsDict[key]["end_ms"] + 200  # noticeable silence
+        ):
+            original_gap = next_sub["start_ms"] - subsDict[key]["end_ms"]
+            saved_gap = int(original_gap * 0.8)  # leave 20% breathing room
+
+            # Move the next segment earlier
+            subsDict[i + 1]["start_ms"] = subsDict[key]["end_ms"] + 100
+            subsDict[i + 1]["end_ms"] = subsDict[i + 1]["start_ms"] + subsDict[i + 1]["duration_ms"]
+
+            log_callback(
+                f"🪄 Adaptive timing: shifted segment {i + 1} earlier by {original_gap - saved_gap}ms "
+                f"to reduce speed-up pressure."
+            )
+
         # Default to natural speed
         speed_factor = natural_speed
 

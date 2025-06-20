@@ -168,73 +168,101 @@ def stretch_audio_clip(audioFileToStretch, speedFactor, num):
     return AudioSegment.from_file(io.BytesIO(out), format="wav")
 
 def align_whisper_segments_to_subs(whisper_segments, subsDict, audio, log_callback):
-    consecutive_failures = 0
-    MAX_ALLOWED_CONSECUTIVE = 1
-    failed_subs = []
-    aligned_audio_clips = []
-    seg_index = 0
+    import numpy as np
+    from difflib import SequenceMatcher
+
+    def similarity(a, b):
+        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
     whisper_len = len(whisper_segments)
+    subtitle_len = len(subsDict)
+    whisper_durations = [int((s['end'] - s['start']) * 1000) for s in whisper_segments]
 
-    last_end_time = 0
+    text_weight = 0.2
+    duration_weight = 0.2
+    index_alignment_weight = 0.6
 
-    for sub_index in subsDict:
-        target_duration = subsDict[sub_index]['duration_ms']
-        sub_start = subsDict[sub_index]['start_ms']
-        sub_end = subsDict[sub_index]['end_ms']
-        collected = []
-        collected_duration = 0
+    anchors = []
+    w_idx = 0
+    max_span = 6
 
-        # Try to collect enough Whisper segments
-        while seg_index < whisper_len:
-            seg = whisper_segments[seg_index]
-            seg_start = int(seg['start'] * 1000)
-            seg_end = int(seg['end'] * 1000)
-            duration = seg_end - seg_start
+    for sub_idx in sorted(subsDict.keys()):
+        subtitle_text = subsDict[sub_idx].get("text", "").strip()
+        sub_duration = subsDict[sub_idx]['duration_ms']
+        best_score = 0.0
+        best_match = None
 
-            if collected and seg_start > sub_end:
+        for span in range(1, max_span + 1):
+            if w_idx + span > whisper_len:
+                break
+            segment_slice = whisper_segments[w_idx:w_idx + span]
+            combined_text = " ".join(seg["text"] for seg in segment_slice)
+            whisper_duration = sum(whisper_durations[w_idx:w_idx + span])
+
+            text_score = similarity(combined_text, subtitle_text)
+            duration_score = 1 - abs(sub_duration - whisper_duration) / sub_duration if sub_duration > 0 else 0
+            index_alignment_score = 1 - abs((sub_idx / subtitle_len) - ((w_idx + span // 2) / whisper_len))
+
+            combined_score = (
+                text_weight * text_score +
+                duration_weight * duration_score +
+                index_alignment_weight * index_alignment_score
+            )
+
+            if combined_score > best_score:
+                best_score = combined_score
+                best_match = (w_idx, w_idx + span)
+
+            if combined_score >= 0.92:
                 break
 
-            collected.append((seg_start, seg_end))
-            collected_duration += duration
-            seg_index += 1
+        if best_score >= 0.45:
+            anchors.append((sub_idx, best_match[0], best_match[1]))
+            log_callback(f"✔ Subtitle {sub_idx} ⟶ segments {best_match[0]}–{best_match[1] - 1} (score={best_score:.2f})")
+            w_idx = best_match[1]
 
-        if not collected:
-            consecutive_failures += 1
-            failed_subs.append(sub_index)
+    all_segment_times = [None] * whisper_len
+    for i in range(len(anchors)):
+        sub_idx, w_start, w_end = anchors[i]
+        sub_start = subsDict[sub_idx]['start_ms']
+        sub_end = subsDict[sub_idx]['end_ms']
 
-            if consecutive_failures > MAX_ALLOWED_CONSECUTIVE:
-                error_msg = (
-                    f"❌ Too many consecutive alignment failures ({consecutive_failures}) "
-                    f"starting at subtitle {failed_subs[0]}.\n"
-                    f"Likely cause: subtitles extend beyond audio transcript.\n"
-                    f"Please check sync or try a longer audio file."
-                )
-                raise Exception(error_msg)
-
-            log_callback(f"⚠️ No Whisper segments found for subtitle {sub_index}. Falling back...")
-            
-            fallback_duration = target_duration
-            start_time = last_end_time
-
-            next_sub = subsDict.get(sub_index + 1)
-            if next_sub:
-                max_allowed = next_sub['start_ms'] - start_time
-                fallback_duration = min(fallback_duration, max(50, max_allowed))
-
-            silent_clip = AudioSegment.silent(duration=fallback_duration)
-            aligned_audio_clips.append(silent_clip)
-            last_end_time = start_time + fallback_duration
+        total_w_dur = sum(whisper_durations[w_start:w_end])
+        if total_w_dur == 0:
             continue
-        else:
-            consecutive_failures = 0
-            failed_subs = []
+        cum_durs = np.cumsum([0] + whisper_durations[w_start:w_end])
+        for j, idx in enumerate(range(w_start, w_end)):
+            rel_pos = cum_durs[j] / total_w_dur
+            aligned_time = int(sub_start + rel_pos * (sub_end - sub_start))
+            all_segment_times[idx] = aligned_time
 
-        # Normal case
-        first_start = collected[0][0]
-        last_end = collected[-1][1]
-        clip = audio[first_start:last_end]
-        aligned_audio_clips.append(clip)
-        last_end_time = last_end
+    last_known = None
+    for i in range(whisper_len):
+        if all_segment_times[i] is not None:
+            last_known = i
+        elif last_known is not None:
+            next_known = next((j for j in range(i + 1, whisper_len) if all_segment_times[j] is not None), None)
+            if next_known is not None:
+                time_start = all_segment_times[last_known]
+                time_end = all_segment_times[next_known]
+                dur = sum(whisper_durations[last_known:next_known])
+                if dur == 0:
+                    continue
+                cum_durs = np.cumsum([0] + whisper_durations[last_known + 1:next_known])
+                for j, idx in enumerate(range(last_known + 1, next_known)):
+                    rel = cum_durs[j] / dur
+                    all_segment_times[idx] = int(time_start + rel * (time_end - time_start))
+
+    for i in range(whisper_len):
+        if all_segment_times[i] is None:
+            prev_time = all_segment_times[i - 1] if i > 0 and all_segment_times[i - 1] is not None else 0
+            all_segment_times[i] = prev_time + whisper_durations[i]
+
+    aligned_audio_clips = []
+    for i in range(whisper_len):
+        start_ms = all_segment_times[i]
+        end_ms = all_segment_times[i + 1] if i + 1 < whisper_len and all_segment_times[i + 1] is not None else start_ms + whisper_durations[i]
+        aligned_audio_clips.append(audio[start_ms:end_ms])
 
     return aligned_audio_clips
 
@@ -245,7 +273,8 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
         i + 1: {
             "start_ms": int(sub.start.ordinal),
             "end_ms": int(sub.end.ordinal),
-            "duration_ms": int(sub.end.ordinal - sub.start.ordinal)
+            "duration_ms": int(sub.end.ordinal - sub.start.ordinal),
+            "text": sub.text.strip()
         } for i, sub in enumerate(subs)
     }
     progress_callback(2)
@@ -261,7 +290,8 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
         log_callback("Trimming audio for fresh transcription...")
         trimmed_audio = trim_clip(full_audio)
 
-    trimmed_path = os.path.abspath(os.path.join(workingFolder, "temp_trimmed.wav"))
+    unique_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    trimmed_path = os.path.abspath(os.path.join(workingFolder, f"temp_trimmed_{unique_id}.wav"))
     trimmed_audio.export(trimmed_path, format="wav")
     progress_callback(5)
 
@@ -272,7 +302,7 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
     else:
         log_callback("Transcribing audio with Whisper...")
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
-        json_out = os.path.join(workingFolder, f"{base_name}_transcript.json")
+        json_out = os.path.join(workingFolder, f"{base_name}_transcript_{unique_id}.json")
         whisper_segments, detected_lang = transcribe_audio_with_whisper(
             trimmed_path, json_out,
             progress_callback=progress_callback,

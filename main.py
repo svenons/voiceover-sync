@@ -250,9 +250,17 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
     }
     progress_callback(2)
 
-    log_callback("Loading voiceover audio and trimming silence...")
+    # replaced section for json transcript working always
+    log_callback("Loading voiceover audio...")
     full_audio = AudioSegment.from_file(audio_path)
-    trimmed_audio = trim_clip(full_audio)
+
+    if transcript_path and os.path.exists(transcript_path):
+        log_callback("Using full audio (no trim) to match saved transcript.")
+        trimmed_audio = full_audio  # Use original audio to match JSON timestamps
+    else:
+        log_callback("Trimming audio for fresh transcription...")
+        trimmed_audio = trim_clip(full_audio)
+
     trimmed_path = os.path.abspath(os.path.join(workingFolder, "temp_trimmed.wav"))
     trimmed_audio.export(trimmed_path, format="wav")
     progress_callback(5)

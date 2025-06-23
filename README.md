@@ -90,6 +90,48 @@ Final audio is saved in the `output/` folder.
 
 ---
 
+## 🛠️ Building the `.exe` Yourself (Standalone Version)
+
+If you'd like to build the `.exe` manually (e.g., to bundle `ffmpeg.exe` for offline use), follow these steps:
+
+### 1. Add FFmpeg to the Project Folder
+
+Download a static `ffmpeg.exe` binary and place it inside a subfolder named:
+`ffmpeg_bin/ffmpeg.exe`
+
+This way, the app will use the local `ffmpeg_bin/ffmpeg.exe` first, and fall back to system `PATH` if it's missing.
+
+You can get it from: [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html)
+
+### 2. Install Python Dependencies
+
+Install required packages:
+
+```bash
+pip install -r requirements.txt
+```
+or manually:
+```pip install pysrt pydub soundfile ttkbootstrap webvtt-py openai-whisper```
+✅ Python 3.10.11 is recommended
+⚠️ Newer versions may have compatibility issues with Whisper or Pydub
+
+### 3. Build the Executable with PyInstaller
+
+Run the following command from the root of the project:
+```pyinstaller --name "voiceover-sync" --add-data "ffmpeg_bin;ffmpeg_bin" --onefile main.py```
+
+✅ This includes the ffmpeg_bin folder inside the .exe
+✅ The program will use ffmpeg_bin/ffmpeg.exe automatically if found
+
+### 4. Locate the Final .exe
+
+The built executable will appear in the dist/ folder:
+```dist/voiceover-sync.exe```
+
+You can now distribute that .exe along with no other requirements — FFmpeg is bundled!
+
+---
+
 ## 🙌 Acknowledgments
 
 - [Pydub](https://github.com/jiaaro/pydub) — audio processing  

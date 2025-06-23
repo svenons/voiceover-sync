@@ -27,7 +27,6 @@ A GUI-based Python tool that synchronizes AI-generated voiceovers with subtitle 
 3. Run `AI Voiceover Synchronizer.exe`
 
 ✅ No Python or pip needed  
-🛑 You **still need FFmpeg** installed separately (see below)
 
 ---
 

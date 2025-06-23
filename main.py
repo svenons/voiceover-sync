@@ -24,6 +24,13 @@ def get_base_path():
         return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
 
+# === FFmpeg Path Configuration ===
+def get_ffmpeg_path():
+    local_ffmpeg = os.path.join(BASE_DIR, "ffmpeg_bin", "ffmpeg.exe")
+    if os.path.exists(local_ffmpeg):
+        return local_ffmpeg
+    return "ffmpeg"  # fallback to system path
+
 # === Configuration ===
 
 class Config:
@@ -67,7 +74,7 @@ def get_speed_factor(subsDict, trimmedAudio, desiredDuration, num):
 
 def stretch_with_ffmpeg(audioInput, speed_factor):
     speed_factor = max(0.6, min(speed_factor, 1.6))
-    command = ['ffmpeg', '-i', 'pipe:0', '-filter:a', f'atempo={speed_factor}', '-f', 'wav', 'pipe:1']
+    command = [get_ffmpeg_path(), '-i', 'pipe:0', '-filter:a', f'atempo={speed_factor}', '-f', 'wav', 'pipe:1']
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, err = process.communicate(input=audioInput.getvalue())
     if process.returncode != 0:
@@ -76,7 +83,7 @@ def stretch_with_ffmpeg(audioInput, speed_factor):
 
 def stretch_audio_clip(audioFileToStretch, speedFactor, num):
     speedFactor = max(Config.MIN_SPEED, min(speedFactor, Config.MAX_SPEED))
-    command = ['ffmpeg', '-i', 'pipe:0', '-filter:a', f"atempo={speedFactor}", '-f', 'wav', 'pipe:1']
+    command = [get_ffmpeg_path(), '-i', 'pipe:0', '-filter:a', f"atempo={speedFactor}", '-f', 'wav', 'pipe:1']
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, err = process.communicate(input=audioFileToStretch.getvalue())
     if process.returncode != 0:
@@ -160,7 +167,7 @@ def trim_clip(inputSound: AudioSegment) -> AudioSegment:
 
 def stretch_audio_clip(audioFileToStretch, speedFactor, num):
     speedFactor = max(0.5, min(speedFactor, 2.0))
-    command = ['ffmpeg', '-i', 'pipe:0', '-filter:a', f"atempo={speedFactor}", '-f', 'wav', 'pipe:1']
+    command = [get_ffmpeg_path(), '-i', 'pipe:0', '-filter:a', f"atempo={speedFactor}", '-f', 'wav', 'pipe:1']
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, err = process.communicate(input=audioFileToStretch.getvalue())
     if process.returncode != 0:

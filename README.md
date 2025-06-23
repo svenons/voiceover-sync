@@ -118,7 +118,15 @@ or manually:
 ### 3. Build the Executable with PyInstaller
 
 Run the following command from the root of the project:
-```pyinstaller --name "voiceover-sync" --add-data "ffmpeg_bin;ffmpeg_bin" --onefile main.py```
+```
+pyinstaller main.py ^
+  --onefile ^
+  --name "voiceover-sync" ^
+  --add-data "ffmpeg_bin;ffmpeg_bin" ^
+  --add-data "venv\Lib\site-packages\whisper\assets;whisper\\assets" ^
+  --hidden-import=whisper ^
+  --hidden-import=torch
+```
 
 ✅ This includes the ffmpeg_bin folder inside the .exe
 ✅ The program will use ffmpeg_bin/ffmpeg.exe automatically if found

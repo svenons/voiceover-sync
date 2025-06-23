@@ -1,6 +1,6 @@
 # AI Voiceover Synchronizer
 
-A GUI-based Python tool that synchronizes AI-generated voiceovers with subtitle timing from `.srt` or `.vtt` files. Perfect for automated dubbing, voiceover alignment, or multilingual content syncing. It's far from being perfect - but it's the best I could do on such short time.
+A GUI-based Python tool that synchronizes AI-generated voiceovers with subtitle timing from `.srt` or `.vtt` files. Good for automated dubbing, voiceover alignment, or multilingual content syncing. It's far from being perfect - but it's the best I could do on such short time.
 
 ---
 
@@ -77,28 +77,16 @@ python main.py
 Or double-click `AI Voiceover Synchronizer.exe` if using the standalone version.
 
 ### Then:
-1. Select a subtitle file (`.srt` or `.vtt`)  
-2. Select an AI voiceover audio (`.mp3`)  
-3. Choose desired output format (`.wav` or `.mp3`)  
-4. Click **Start** to begin  
+1. Select a subtitle file (`.srt` or `.vtt`) from the original (English) video, 
+2. Select an AI voiceover audio (`.mp3`)  ,
+3. Choose desired output format (`.wav` or `.mp3`),  
+4. Click **Start** to begin,
+5. Depending on the lenght of the video, takes approx. 2 hours for 40min video from my initial testing, may be faster on powerful hardware.
 
 🟡 You can pause/resume the process  
 🔴 Click **Stop** to cancel and clear progress/output  
 
 Final audio is saved in the `output/` folder.
-
----
-
-## 🧱 Project Structure
-
-"""
-├── main.py             # Full GUI app
-├── workingFolder/      # Temporary processing files
-├── output/             # Final result saved here
-├── README.md
-├── LICENSE
-└── requirements.txt
-"""
 
 ---
 

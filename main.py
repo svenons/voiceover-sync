@@ -35,7 +35,7 @@ def get_ffmpeg_path():
 
 class Config:
     debug_mode = False
-    MIN_SPEED = 0.7
+    MIN_SPEED = 0.85
     MAX_SPEED = 1.25
 
 class SubsDictKeys:
@@ -159,6 +159,36 @@ def load_whisper_json(json_path):
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return data['segments']
+
+def merge_segments_until_period(segments):
+    merged = []
+    buffer = []
+    start_time = None
+
+    for seg in segments:
+        if not buffer:
+            start_time = seg['start']
+        
+        buffer.append(seg['text'])
+        end_time = seg['end']
+
+        if seg['text'].strip().endswith('.'):
+            merged.append({
+                'start': start_time,
+                'end': end_time,
+                'text': ' '.join(buffer).strip()
+            })
+            buffer = []
+    
+    # In case some leftover segments don't end with a period
+    if buffer:
+        merged.append({
+            'start': start_time,
+            'end': end_time,
+            'text': ' '.join(buffer).strip()
+        })
+
+    return merged
 
 def trim_clip(inputSound: AudioSegment) -> AudioSegment:
     start_trim = detect_leading_silence(inputSound)
@@ -304,17 +334,22 @@ def process_audio_with_progress(srt_path, audio_path, output_path, log_callback,
 
     if transcript_path and os.path.exists(transcript_path):
         log_callback(f"Loading Whisper transcription from file: {transcript_path}")
-        whisper_segments = load_whisper_json(transcript_path)
+        raw_segments = load_whisper_json(transcript_path)
+        whisper_segments = merge_segments_until_period(raw_segments)
         progress_callback(35)
     else:
         log_callback("Transcribing audio with Whisper...")
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
         json_out = os.path.join(workingFolder, f"{base_name}_transcript_{unique_id}.json")
-        whisper_segments, detected_lang = transcribe_audio_with_whisper(
+        
+        raw_segments, detected_lang = transcribe_audio_with_whisper(
             trimmed_path, json_out,
             progress_callback=progress_callback,
             log_callback=log_callback
         )
+
+        whisper_segments = merge_segments_until_period(raw_segments)
+
         if hasattr(log_callback, '__self__'):
             setattr(log_callback.__self__, "detected_language", detected_lang)
 
@@ -502,6 +537,19 @@ class AudioApp:
         self.format_var = tk.StringVar(value="wav")
         tb.OptionMenu(frame, self.format_var, "wav", "mp3").pack(fill=X)
 
+        tb.Label(frame, text="4. Set Speed Limits (optional)").pack(anchor=W, pady=(10, 0))
+
+        speed_frame = tb.Frame(frame)
+        speed_frame.pack(fill=X)
+
+        tb.Label(speed_frame, text="Min Speed:").pack(side=LEFT)
+        self.min_speed_var = tk.DoubleVar(value=Config.MIN_SPEED)
+        tb.Entry(speed_frame, textvariable=self.min_speed_var, width=5).pack(side=LEFT, padx=(0, 10))
+
+        tb.Label(speed_frame, text="Max Speed:").pack(side=LEFT)
+        self.max_speed_var = tk.DoubleVar(value=Config.MAX_SPEED)
+        tb.Entry(speed_frame, textvariable=self.max_speed_var, width=5).pack(side=LEFT)
+
         self.start_btn = tb.Button(frame, text="Start", bootstyle=SUCCESS, command=self.start_thread)
         self.start_btn.pack(fill=X, pady=(10, 0))
 
@@ -585,6 +633,17 @@ class AudioApp:
         if not self.srt_path or not self.audio_path:
             messagebox.showwarning("Missing Input", "Please select both a subtitle and audio file.")
             return
+        
+        # Update Config values from user input
+        try:
+            Config.MIN_SPEED = float(self.min_speed_var.get())
+            Config.MAX_SPEED = float(self.max_speed_var.get())
+            if Config.MIN_SPEED >= Config.MAX_SPEED:
+                raise ValueError("Min Speed must be less than Max Speed.")
+        except ValueError as e:
+            messagebox.showerror("Invalid Speed Settings", str(e))
+            return
+
         self.output_format = self.format_var.get()
         # Get detected language if available (fallback to 'unknown')
         lang = getattr(self, "detected_language", "unknown")
